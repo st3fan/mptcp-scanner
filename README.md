@@ -45,6 +45,7 @@ mptcprobe [options] [<ip|cidr|host|host:port> ...]
   -o string         write JSONL here instead of stdout
   -max-targets int  refuse to expand more than this many unique addresses (default 1048576)
   -q                suppress all logging on stderr
+  -only-mptcp       write only results that used MPTCP
 ```
 
 Options must come before the targets. Targets may be IPs, CIDR blocks,
@@ -136,6 +137,18 @@ Filter for servers that answered `MP_CAPABLE`:
 ```sh
 mptcprobe -q -p 80,443 192.0.2.0/24 | jq -c 'select(.mptcp)'
 ```
+
+`-only-mptcp` applies the same filter without `jq`, writing only results whose
+`status` is `mptcp`:
+
+```sh
+mptcprobe -only-mptcp -q -p 80,443 192.0.2.0/24
+```
+
+Filtering only affects which JSONL lines are written. Every probe is still
+counted, so the plan, progress, and summary report the whole scan. On a host
+that cannot originate MPTCP (see Requirements) this flag produces no output at
+all; the warning and a summary with `mptcp=0` explain why.
 
 ## How the check works
 

@@ -239,6 +239,27 @@ func TestTimestampWriterPrefixesEveryLine(t *testing.T) {
 	}
 }
 
+func TestEmitResultOnlyMPTCP(t *testing.T) {
+	for _, tt := range []struct {
+		status    string
+		onlyMPTCP bool
+		want      bool
+	}{
+		{"mptcp", true, true},
+		{"tcp", true, false},
+		{"refused", true, false},
+		{"timeout", true, false},
+		{"unreachable", true, false},
+		{"error", true, false},
+		{"tcp", false, true},
+		{"refused", false, true},
+	} {
+		if got := emitResult(result{Status: tt.status}, tt.onlyMPTCP); got != tt.want {
+			t.Errorf("emitResult(status=%q, onlyMPTCP=%v) = %v, want %v", tt.status, tt.onlyMPTCP, got, tt.want)
+		}
+	}
+}
+
 func TestScanStatsProgressCountsUniqueAddresses(t *testing.T) {
 	stats := newScanStats()
 	for i := 0; i < 512; i++ {
@@ -385,5 +406,26 @@ func TestCLIExpansionErrorStillSummarizes(t *testing.T) {
 	lines := strings.Split(strings.TrimSpace(stderr), "\n")
 	if !strings.Contains(stderr, "error: mptcprobe: target limit") || !strings.Contains(lines[len(lines)-1], "summary: addresses=1 probes=1 ") {
 		t.Fatalf("expected error followed by a final partial summary: %s", stderr)
+	}
+}
+
+func TestCLIOnlyMPTCPFiltersOutputButKeepsSummary(t *testing.T) {
+	args := []string{"-p", "1", "-t", "1ms", "127.0.0.1"}
+	all, stderr, err := runCLI(t, "UTC", "", args...)
+	if err != nil {
+		t.Fatalf("CLI failed: %v: %s", err, stderr)
+	}
+	if strings.Contains(all, `"mptcp":true`) {
+		t.Skipf("loopback answered with MPTCP; cannot test filtering: %s", all)
+	}
+	filtered, stderr, err := runCLI(t, "UTC", "", append([]string{"-only-mptcp"}, args...)...)
+	if err != nil {
+		t.Fatalf("CLI failed: %v: %s", err, stderr)
+	}
+	if filtered != "" {
+		t.Fatalf("expected no JSONL with -only-mptcp, got %q", filtered)
+	}
+	if !strings.Contains(stderr, "summary: addresses=1 probes=1 ") {
+		t.Fatalf("filtered scan should still summarize the whole scan: %s", stderr)
 	}
 }
