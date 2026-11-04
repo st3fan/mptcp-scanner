@@ -112,6 +112,88 @@ func TestExpandEndpointTargetLimit(t *testing.T) {
 	}
 }
 
+func TestExpandDeduplicatesEndpoints(t *testing.T) {
+	for _, tt := range []struct {
+		name  string
+		specs []string
+		ports []int
+		want  []job
+	}{
+		{
+			name:  "repeated targets with additional ports",
+			specs: []string{"192.0.2.1:8080", "192.0.2.1:8080", "192.0.2.1", "192.0.2.1:9090"},
+			ports: []int{443},
+			want: []job{
+				{"192.0.2.1:8080", netip.MustParseAddr("192.0.2.1"), 443},
+				{"192.0.2.1:8080", netip.MustParseAddr("192.0.2.1"), 8080},
+				{"192.0.2.1:9090", netip.MustParseAddr("192.0.2.1"), 9090},
+			},
+		},
+		{
+			name:  "endpoint and bare target defaults",
+			specs: []string{"192.0.2.1:8080", "192.0.2.1", "192.0.2.1:443"},
+			want: []job{
+				{"192.0.2.1:8080", netip.MustParseAddr("192.0.2.1"), 8080},
+				{"192.0.2.1", netip.MustParseAddr("192.0.2.1"), 80},
+				{"192.0.2.1", netip.MustParseAddr("192.0.2.1"), 443},
+			},
+		},
+		{
+			name:  "overlapping CIDRs and individual IPs",
+			specs: []string{"192.0.2.0/31", "192.0.2.1", "192.0.2.0/30"},
+			ports: []int{443},
+			want: []job{
+				{"192.0.2.0/31", netip.MustParseAddr("192.0.2.0"), 443},
+				{"192.0.2.0/31", netip.MustParseAddr("192.0.2.1"), 443},
+				{"192.0.2.0/30", netip.MustParseAddr("192.0.2.2"), 443},
+				{"192.0.2.0/30", netip.MustParseAddr("192.0.2.3"), 443},
+			},
+		},
+		{
+			name:  "equivalent IPv6 spellings",
+			specs: []string{"2001:db8::1", "2001:0db8:0:0:0:0:0:1", "[2001:db8::1]:8080"},
+			ports: []int{443},
+			want: []job{
+				{"2001:db8::1", netip.MustParseAddr("2001:db8::1"), 443},
+				{"[2001:db8::1]:8080", netip.MustParseAddr("2001:db8::1"), 8080},
+			},
+		},
+		{
+			name:  "IPv4-mapped IPv6 including CIDRs",
+			specs: []string{"192.0.2.1:8080", "[::ffff:192.0.2.1]:8080", "::ffff:192.0.2.1/128"},
+			ports: []int{8080},
+			want: []job{
+				{"192.0.2.1:8080", netip.MustParseAddr("192.0.2.1"), 8080},
+			},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := collectJobs(tt.specs, tt.ports, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Fatalf("got %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestExpandDuplicatesDoNotExhaustTargetLimit(t *testing.T) {
+	got, err := collectJobs([]string{"192.0.2.1:8080", "192.0.2.1:8080", "192.0.2.1:9090", "192.0.2.1/32"}, []int{443}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []job{
+		{"192.0.2.1:8080", netip.MustParseAddr("192.0.2.1"), 443},
+		{"192.0.2.1:8080", netip.MustParseAddr("192.0.2.1"), 8080},
+		{"192.0.2.1:9090", netip.MustParseAddr("192.0.2.1"), 9090},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+}
+
 func TestReadTargets(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "targets.txt")
 	if err := os.WriteFile(path, []byte("# targets\r\n 192.0.2.1:8080 \r\n\n example.com\n [::1]:9090"), 0600); err != nil {

@@ -30,7 +30,7 @@ mptcp-scanner [options] [<ip|cidr|host|host:port> ...]
   -i string         read targets (host or host:port), one per line ("-" for stdin)
   -f string         alias for -i
   -o string         write JSONL here instead of stdout
-  -max-targets int  refuse to expand more than this many addresses (default 1048576)
+  -max-targets int  refuse to expand more than this many unique addresses (default 1048576)
   -q                suppress warnings and the summary on stderr
 ```
 
@@ -62,6 +62,12 @@ ports 8080 and 9090 for `144.202.29.87:8080`, and port 9090 for `example.com`.
 Without `-p`, entries with a port use only that port, while entries without a
 port use the default ports 80 and 443. `-i -` reads the list from stdin.
 
+Each resolved IP/port pair is probed only once per run, including across file
+entries, command-line targets, hostnames, and overlapping CIDRs. Additional
+ports for an already seen IP are still checked. IPv4 and IPv4-mapped IPv6
+addresses are treated as the same IP. `-max-targets` counts unique IP addresses;
+the scanner keeps a record of scheduled IPs and ports in memory.
+
 ## Output
 
 One JSON object per line:
@@ -81,8 +87,9 @@ One JSON object per line:
 | `unreachable` | host or network unreachable                                   |
 | `error`       | anything else; see the `error` field                          |
 
-`target` is the spec as written on the command line or in the input file,
-including any explicit port, so results can be traced back to their input.
+`target` is the first spec that requested that IP/port pair, as written on the
+command line or in the input file, including any explicit port. Command-line
+targets are processed before file entries.
 
 Filter for servers that answered `MP_CAPABLE`:
 

@@ -114,7 +114,7 @@ func main() {
 	outPath := flag.String("o", "", "write JSONL here instead of stdout")
 	targetsFile := flag.String("i", "", "read targets (host or host:port), one per line (\"-\" for stdin)")
 	flag.StringVar(targetsFile, "f", "", "alias for -i")
-	maxTargets := flag.Int("max-targets", 1<<20, "refuse to expand more than this many addresses (0 = no limit)")
+	maxTargets := flag.Int("max-targets", 1<<20, "refuse to expand more than this many unique addresses (0 = no limit)")
 	quiet := flag.Bool("q", false, "suppress warnings and the summary on stderr")
 
 	flag.Usage = func() {
@@ -297,16 +297,25 @@ func parseTarget(spec string, ports []int) (string, []int, error) {
 	return host, ports, nil
 }
 
-// expand turns the target specs into jobs, streaming them so that large CIDRs
-// do not have to be held in memory.
+// expand streams jobs from target specs, tracking resolved endpoints so each
+// IP/port pair is probed only once, even when input targets overlap.
 func expand(specs []string, ports []int, maxTargets int, quiet bool, jobs chan<- job) error {
-	emitted := 0
+	seen := make(map[netip.Addr]map[int]struct{})
 	emit := func(spec string, ip netip.Addr, ports []int) error {
-		if maxTargets > 0 && emitted >= maxTargets {
-			return fmt.Errorf("target limit of %d addresses reached (raise -max-targets)", maxTargets)
+		ip = ip.Unmap()
+		seenPorts, ok := seen[ip]
+		if !ok {
+			if maxTargets > 0 && len(seen) >= maxTargets {
+				return fmt.Errorf("target limit of %d addresses reached (raise -max-targets)", maxTargets)
+			}
+			seenPorts = make(map[int]struct{})
+			seen[ip] = seenPorts
 		}
-		emitted++
 		for _, p := range ports {
+			if _, ok := seenPorts[p]; ok {
+				continue
+			}
+			seenPorts[p] = struct{}{}
 			jobs <- job{spec: spec, ip: ip, port: p}
 		}
 		return nil
@@ -338,7 +347,7 @@ func expand(specs []string, ports []int, maxTargets int, quiet bool, jobs chan<-
 			}
 		default:
 			if ip, err := netip.ParseAddr(host); err == nil {
-				if err := emit(spec, ip.Unmap(), targetPorts); err != nil {
+				if err := emit(spec, ip, targetPorts); err != nil {
 					return err
 				}
 				continue
@@ -355,7 +364,7 @@ func expand(specs []string, ports []int, maxTargets int, quiet bool, jobs chan<-
 				if !ok {
 					continue
 				}
-				if err := emit(spec, ip.Unmap(), targetPorts); err != nil {
+				if err := emit(spec, ip, targetPorts); err != nil {
 					return err
 				}
 			}
