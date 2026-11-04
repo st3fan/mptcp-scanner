@@ -181,6 +181,7 @@ func main() {
 	flag.StringVar(targetsFile, "f", "", "alias for -i")
 	maxTargets := flag.Int("max-targets", 1<<20, "refuse to expand more than this many unique addresses (0 = no limit)")
 	quiet := flag.Bool("q", false, "suppress all logging on stderr")
+	onlyMPTCP := flag.Bool("only-mptcp", false, "write only results that used MPTCP")
 
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "usage: %s [options] [<ip|cidr|host|host:port> ...]\n\n", os.Args[0])
@@ -262,10 +263,15 @@ func main() {
 	go func() {
 		defer close(writerDone)
 		for r := range results {
-			if err := enc.Encode(r); err != nil {
-				fatal("writing output: %v", err)
+			// Every result is counted, even when it is filtered from the
+			// output, so the summary always reflects the whole scan.
+			progress := stats.record(r)
+			if emitResult(r, *onlyMPTCP) {
+				if err := enc.Encode(r); err != nil {
+					fatal("writing output: %v", err)
+				}
 			}
-			if stats.record(r) {
+			if progress {
 				stats.report(log.Default(), "progress")
 			}
 		}
@@ -337,6 +343,13 @@ func probe(j job, timeout time.Duration) result {
 		r.Status = "tcp"
 	}
 	return r
+}
+
+// emitResult reports whether a result belongs in the output. Every result is
+// still counted by the caller; -only-mptcp narrows the JSONL to the positive
+// case, where the connection actually used MPTCP.
+func emitResult(r result, onlyMPTCP bool) bool {
+	return !onlyMPTCP || r.Status == "mptcp"
 }
 
 func classify(err error) string {
