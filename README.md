@@ -33,7 +33,7 @@ mptcprobe [options] [<ip|cidr|host|host:port> ...]
   -f string         alias for -i
   -o string         write JSONL here instead of stdout
   -max-targets int  refuse to expand more than this many unique addresses (default 1048576)
-  -q                suppress warnings and the summary on stderr
+  -q                suppress all logging on stderr
 ```
 
 Options must come before the targets. Targets may be IPs, CIDR blocks,
@@ -79,6 +79,23 @@ entries, command-line targets, hostnames, and overlapping CIDRs. Additional
 ports for an already seen IP are still checked. IPv4 and IPv4-mapped IPv6
 addresses are treated as the same IP. `-max-targets` counts unique IP addresses;
 the scanner keeps a record of scheduled IPs and ports in memory.
+
+Logs go to stderr through Go's `log` package. Every log line starts with an
+ISO 8601 timestamp with a timezone offset, using the local timezone selected
+by `TZ` (for example, `TZ=America/Toronto`). JSONL result timestamps remain UTC.
+At startup, a plan reports the input count, ports, concurrency, timeout,
+address limit, and output destination. Input counts are target specifications,
+before DNS resolution, CIDR expansion, and deduplication.
+
+Progress is logged every 256 unique IPs with at least one completed probe.
+Additional ports on the same IP do not advance the address count. Progress
+and the final summary include address and probe counts, elapsed time, and all
+status counts. Scans below 256 addresses log only the plan, any warnings, and
+the summary. If target expansion stops early, the summary covers completed work.
+
+Use `-q` to suppress all logging, including warnings and runtime errors, while
+keeping JSONL results. Failures still exit with a nonzero status. Explicit help
+and flag usage are displayed normally.
 
 ## Output
 

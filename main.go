@@ -14,6 +14,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/netip"
 	"os"
@@ -44,6 +45,67 @@ type job struct {
 	spec string
 	ip   netip.Addr
 	port int
+}
+
+// timestampWriter gives every log line an ISO timestamp in the local timezone
+// (selected by TZ), including continuation lines in a multi-line message.
+type timestampWriter struct {
+	out io.Writer
+}
+
+func (w timestampWriter) Write(p []byte) (int, error) {
+	stamp := time.Now().Format(time.RFC3339)
+	var message strings.Builder
+	for _, line := range strings.SplitAfter(string(p), "\n") {
+		if line != "" {
+			message.WriteString(stamp)
+			message.WriteByte(' ')
+			message.WriteString(line)
+		}
+	}
+	n, err := io.WriteString(w.out, message.String())
+	if err != nil {
+		return 0, err
+	}
+	if n != message.Len() {
+		return 0, io.ErrShortWrite
+	}
+	return len(p), nil
+}
+
+// scanStats belongs to the result writer. An address counts once its first
+// probe finishes; additional ports contribute only to the probe/status counts.
+type scanStats struct {
+	started   time.Time
+	addresses map[string]struct{}
+	probes    int
+	counts    map[string]int
+}
+
+func newScanStats() *scanStats {
+	return &scanStats{
+		started:   time.Now(),
+		addresses: make(map[string]struct{}),
+		counts:    make(map[string]int),
+	}
+}
+
+// record reports whether this result crosses a 256-address progress boundary.
+func (s *scanStats) record(r result) bool {
+	s.probes++
+	s.counts[r.Status]++
+	if _, ok := s.addresses[r.IP]; ok {
+		return false
+	}
+	s.addresses[r.IP] = struct{}{}
+	return len(s.addresses)%256 == 0
+}
+
+func (s *scanStats) report(logger *log.Logger, label string) {
+	logger.Printf("%s: addresses=%d probes=%d elapsed=%s mptcp=%d tcp=%d refused=%d timeout=%d unreachable=%d error=%d",
+		label, len(s.addresses), s.probes, time.Since(s.started).Round(time.Millisecond),
+		s.counts["mptcp"], s.counts["tcp"], s.counts["refused"], s.counts["timeout"],
+		s.counts["unreachable"], s.counts["error"])
 }
 
 type portList []int
@@ -106,6 +168,9 @@ func dedupePorts(ports []int) []int {
 }
 
 func main() {
+	log.SetFlags(0)
+	log.SetOutput(timestampWriter{out: os.Stderr})
+
 	var ports portList
 	flag.Var(&ports, "p", "port to probe; repeatable, accepts lists and ranges (default 80,443)")
 	concurrency := flag.Int("c", 16, "number of concurrent probes")
@@ -115,7 +180,7 @@ func main() {
 	targetsFile := flag.String("i", "", "read targets (host or host:port), one per line (\"-\" for stdin)")
 	flag.StringVar(targetsFile, "f", "", "alias for -i")
 	maxTargets := flag.Int("max-targets", 1<<20, "refuse to expand more than this many unique addresses (0 = no limit)")
-	quiet := flag.Bool("q", false, "suppress warnings and the summary on stderr")
+	quiet := flag.Bool("q", false, "suppress all logging on stderr")
 
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "usage: %s [options] [<ip|cidr|host|host:port> ...]\n\n", os.Args[0])
@@ -124,6 +189,9 @@ func main() {
 		fmt.Fprintf(os.Stderr, "  status is one of mptcp, tcp, refused, timeout, unreachable, error\n")
 	}
 	flag.Parse()
+	if *quiet {
+		log.SetOutput(io.Discard)
+	}
 
 	ports = dedupePorts(ports)
 
@@ -143,12 +211,6 @@ func main() {
 		fatal("-c must be at least 1")
 	}
 
-	if !*quiet {
-		if warning := localMPTCPWarning(); warning != "" {
-			fmt.Fprintf(os.Stderr, "warning: %s\n", warning)
-		}
-	}
-
 	out := io.Writer(os.Stdout)
 	if *outPath != "" {
 		f, err := os.Create(*outPath)
@@ -161,6 +223,25 @@ func main() {
 	w := bufio.NewWriter(out)
 	defer w.Flush()
 	enc := json.NewEncoder(w)
+
+	portPlan := "per-target port, otherwise 80,443"
+	if len(ports) > 0 {
+		portPlan = fmt.Sprintf("%v plus per-target ports", ports)
+	}
+	limitPlan := "unlimited"
+	if *maxTargets > 0 {
+		limitPlan = strconv.Itoa(*maxTargets)
+	}
+	outputPlan := "stdout"
+	if *outPath != "" {
+		outputPlan = *outPath
+	}
+	stats := newScanStats()
+	log.Printf("plan: inputs=%d ports=%q concurrency=%d timeout=%s max_addresses=%s output=%q",
+		len(specs), portPlan, *concurrency, *timeout, limitPlan, outputPlan)
+	if warning := localMPTCPWarning(); warning != "" {
+		log.Printf("warning: %s", warning)
+	}
 
 	jobs := make(chan job)
 	results := make(chan result)
@@ -178,13 +259,14 @@ func main() {
 
 	// A single writer owns the output, so lines never interleave.
 	writerDone := make(chan struct{})
-	counts := map[string]int{}
 	go func() {
 		defer close(writerDone)
 		for r := range results {
-			counts[r.Status]++
 			if err := enc.Encode(r); err != nil {
 				fatal("writing output: %v", err)
+			}
+			if stats.record(r) {
+				stats.report(log.Default(), "progress")
 			}
 		}
 	}()
@@ -194,15 +276,16 @@ func main() {
 	wg.Wait()
 	close(results)
 	<-writerDone
-	w.Flush()
+	if err := w.Flush(); err != nil {
+		fatal("writing output: %v", err)
+	}
 
 	if expandErr != nil {
-		fatal("%v", expandErr)
+		log.Printf("error: mptcprobe: %v", expandErr)
 	}
-	if !*quiet {
-		fmt.Fprintf(os.Stderr, "summary: mptcp=%d tcp=%d refused=%d timeout=%d unreachable=%d error=%d\n",
-			counts["mptcp"], counts["tcp"], counts["refused"], counts["timeout"],
-			counts["unreachable"], counts["error"])
+	stats.report(log.Default(), "summary")
+	if expandErr != nil {
+		os.Exit(1)
 	}
 }
 
@@ -355,7 +438,7 @@ func expand(specs []string, ports []int, maxTargets int, quiet bool, jobs chan<-
 			ips, err := net.LookupIP(host)
 			if err != nil {
 				if !quiet {
-					fmt.Fprintf(os.Stderr, "warning: cannot resolve %q: %v\n", spec, err)
+					log.Printf("warning: cannot resolve %q: %v", spec, err)
 				}
 				continue
 			}
@@ -413,6 +496,6 @@ func localMPTCPWarning() string {
 }
 
 func fatal(format string, args ...any) {
-	fmt.Fprintf(os.Stderr, "mptcprobe: "+format+"\n", args...)
+	log.Printf("error: mptcprobe: "+format, args...)
 	os.Exit(1)
 }

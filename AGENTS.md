@@ -50,13 +50,18 @@ binaries are named `mptcprobe-linux-amd64` / `mptcprobe-linux-arm64`.
   prefix with more than 2^20 hosts is refused outright; `-max-targets` caps the
   total unique IP addresses.
 - **One writer goroutine** owns the encoder so JSONL lines never interleave.
-  Workers send `result` values to it over a channel.
+  Workers send `result` values to it over a channel. It also owns scan statistics;
+  progress counts each unique IP once its first probe completes, every 256 IPs.
+- **Logging** uses Go's `log` package on stderr, with RFC3339 timestamps in the
+  local timezone selected by `TZ`. A plan precedes scanning and a summary follows
+  it. `-q` suppresses all logging, including runtime errors; exit codes still
+  indicate failure. JSONL timestamps remain UTC.
 - **Flags must precede targets.** Go's `flag` stops at the first positional, so
   a trailing `-p 443` would otherwise be DNS-resolved as a hostname.
   `expand()` rejects any target starting with `-` with a pointed error.
 - **`status` is a closed set**: `mptcp`, `tcp`, `refused`, `timeout`,
   `unreachable`, `error`. `classify()` maps errno values onto it. Adding a
-  value means updating the README table and the summary line in `main()`.
+  value means updating the README table and `scanStats.report()`.
 - **`target` preserves the first spec requesting each IP/port pair** (the CIDR,
   hostname, or endpoint as typed) next to the resolved `ip`, so results trace
   back to their input.
@@ -81,4 +86,4 @@ Quick local smoke test (expect all `tcp`/`refused`/`timeout` on macOS):
   but only on Linux — it would need a build tag and CI that runs there.
 - Reporting MPTCP version or subflow details from `MPTCP_INFO` (Go does not
   expose it; would need a raw `getsockopt`).
-- Progress output for large scans; retries; rate limiting.
+- Retries; rate limiting.
