@@ -1,7 +1,9 @@
-# mptcp-scanner
+# mptcpain
 
 Connects to TCP endpoints with `IPPROTO_MPTCP` enabled and reports, as JSONL,
 whether the remote side actually spoke Multipath TCP.
+
+Repository: [st3fan/mptcpain](https://github.com/st3fan/mptcpain).
 
 ## Requirements
 
@@ -11,9 +13,9 @@ TCP and every target is reported as `tcp`. The scanner prints a warning on
 stderr when it detects this, or when `net.mptcp.enabled=0`.
 
 ```sh
-go build .                                                      # local
-GOOS=linux GOARCH=amd64 go build -o mptcp-scanner-linux-amd64 . # for a Linux host
-GOOS=linux GOARCH=arm64 go build -o mptcp-scanner-linux-arm64 .
+go build -o mptcpain .                                 # local
+GOOS=linux GOARCH=amd64 go build -o mptcpain-linux-amd64 . # for a Linux host
+GOOS=linux GOARCH=arm64 go build -o mptcpain-linux-arm64 .
 ```
 
 The scanner is a single file with no dependencies outside the standard library.
@@ -21,7 +23,7 @@ The scanner is a single file with no dependencies outside the standard library.
 ## Usage
 
 ```sh
-mptcp-scanner [options] [<ip|cidr|host|host:port> ...]
+mptcpain [options] [<ip|cidr|host|host:port> ...]
 
   -p value          port to probe; repeatable, accepts lists and ranges (default 80,443)
   -c int            number of concurrent probes (default 16)
@@ -40,11 +42,11 @@ hostnames (all resolved addresses are probed), or `host:port` endpoints. Use
 wider than 2^20 addresses is rejected.
 
 ```sh
-mptcp-scanner -p 8080 144.202.29.87
-mptcp-scanner -c 16 -t 2.5s -p 8080,9090 144.202.29.87
-mptcp-scanner -p 80,443 -p 8000-8010 -c 500 192.0.2.0/24
-mptcp-scanner -i targets.txt -o results.jsonl
-mptcp-scanner -i - -p 443 < targets.txt
+mptcpain -p 8080 144.202.29.87
+mptcpain -c 16 -t 2.5s -p 8080,9090 144.202.29.87
+mptcpain -p 80,443 -p 8000-8010 -c 500 192.0.2.0/24
+mptcpain -i targets.txt -o results.jsonl
+mptcpain -i - -p 443 < targets.txt
 ```
 
 `-i` adds file entries to any command-line targets. Use one target per line;
@@ -67,7 +69,7 @@ into the scanner to check them for MPTCP support:
 
 ```sh
 naabu -host 192.0.2.0/24 -p 80,443 -silent |
-  ./mptcp-scanner -i -
+  ./mptcpain -i -
 ```
 
 `192.0.2.0/24` is reserved for documentation; replace it with your target network.
@@ -104,7 +106,7 @@ targets are processed before file entries.
 Filter for servers that answered `MP_CAPABLE`:
 
 ```sh
-mptcp-scanner -q -p 80,443 192.0.2.0/24 | jq -c 'select(.mptcp)'
+mptcpain -q -p 80,443 192.0.2.0/24 | jq -c 'select(.mptcp)'
 ```
 
 ## How the check works
