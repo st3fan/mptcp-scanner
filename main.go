@@ -1,4 +1,4 @@
-// mptcp-scanner connects to TCP endpoints with MPTCP (IPPROTO_MPTCP) enabled
+// mptcprobe connects to TCP endpoints with MPTCP (IPPROTO_MPTCP) enabled
 // and reports, as JSONL, whether the remote side actually spoke Multipath TCP.
 //
 // Targets may be IP addresses, CIDR blocks, hostnames or host:port endpoints.
@@ -413,6 +413,6 @@ func localMPTCPWarning() string {
 }
 
 func fatal(format string, args ...any) {
-	fmt.Fprintf(os.Stderr, "mptcp-scanner: "+format+"\n", args...)
+	fmt.Fprintf(os.Stderr, "mptcprobe: "+format+"\n", args...)
 	os.Exit(1)
 }

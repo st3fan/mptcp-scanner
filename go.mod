@@ -1,3 +1,3 @@
-module github.com/sarentz-tc/mptcp-scanner
+module github.com/st3fan/mptcprobe
 
 go 1.27.1
