@@ -1,12 +1,20 @@
 package main
 
 import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"flag"
+	"fmt"
+	"log"
 	"net/netip"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestParseTarget(t *testing.T) {
@@ -206,5 +214,176 @@ func TestReadTargets(t *testing.T) {
 	want := []string{"192.0.2.1:8080", "example.com", "[::1]:9090"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("got %v, want %v", got, want)
+	}
+}
+
+func TestTimestampWriterPrefixesEveryLine(t *testing.T) {
+	var out bytes.Buffer
+	logger := log.New(timestampWriter{out: &out}, "", 0)
+	logger.Print("first line\nsecond line")
+	lines := strings.Split(strings.TrimSuffix(out.String(), "\n"), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("expected two log lines, got %q", out.String())
+	}
+	for i, line := range lines {
+		stamp, message, ok := strings.Cut(line, " ")
+		if !ok {
+			t.Fatalf("missing timestamp in %q", line)
+		}
+		if _, err := time.Parse(time.RFC3339, stamp); err != nil {
+			t.Fatalf("invalid ISO timestamp %q: %v", stamp, err)
+		}
+		if want := []string{"first line", "second line"}[i]; message != want {
+			t.Fatalf("got message %q, want %q", message, want)
+		}
+	}
+}
+
+func TestScanStatsProgressCountsUniqueAddresses(t *testing.T) {
+	stats := newScanStats()
+	for i := 0; i < 512; i++ {
+		ip := netip.AddrFrom4([4]byte{192, 0, byte(i >> 8), byte(i)}).String()
+		if got, want := stats.record(result{IP: ip, Port: 80, Status: "tcp"}), (i+1)%256 == 0; got != want {
+			t.Fatalf("address %d: progress=%v, want %v", i+1, got, want)
+		}
+		if stats.record(result{IP: ip, Port: 443, Status: "mptcp"}) {
+			t.Fatalf("additional port advanced progress at address %d", i+1)
+		}
+	}
+	if len(stats.addresses) != 512 || stats.probes != 1024 || stats.counts["tcp"] != 512 || stats.counts["mptcp"] != 512 {
+		t.Fatalf("incorrect totals: %+v", stats)
+	}
+	var out bytes.Buffer
+	stats.report(log.New(&out, "", 0), "summary")
+	for _, want := range []string{"summary: addresses=512 probes=1024 elapsed=", "mptcp=512 tcp=512 refused=0 timeout=0 unreachable=0 error=0"} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("missing %q in summary %q", want, out.String())
+		}
+	}
+}
+
+// Run the real CLI in a subprocess so flag parsing, os.Exit, and TZ are isolated.
+func TestCLIHelperProcess(t *testing.T) {
+	if os.Getenv("MPTCPROBE_CLI_HELPER") != "1" {
+		return
+	}
+	os.Args = append([]string{"mptcprobe"}, flag.Args()...)
+	flag.CommandLine = flag.NewFlagSet("mptcprobe", flag.ExitOnError)
+	main()
+	os.Exit(0)
+}
+
+func runCLI(t *testing.T, timezone, input string, args ...string) (string, string, error) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, os.Args[0], append([]string{"-test.run=^TestCLIHelperProcess$", "--"}, args...)...)
+	cmd.Env = append(os.Environ(), "MPTCPROBE_CLI_HELPER=1", "TZ="+timezone)
+	cmd.Stdin = strings.NewReader(input)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	err := cmd.Run()
+	if ctx.Err() != nil {
+		t.Fatalf("CLI timed out: %s", stderr.String())
+	}
+	return stdout.String(), stderr.String(), err
+}
+
+func TestCLILoggingRespectsTimezone(t *testing.T) {
+	for _, timezone := range []string{"UTC", "America/Toronto"} {
+		t.Run(timezone, func(t *testing.T) {
+			location, err := time.LoadLocation(timezone)
+			if err != nil {
+				t.Fatal(err)
+			}
+			stdout, stderr, err := runCLI(t, timezone, "", "-t", "1ms", "-p", "1", "127.0.0.1")
+			if err != nil {
+				t.Fatalf("CLI failed: %v: %s", err, stderr)
+			}
+			lines := strings.Split(strings.TrimSpace(stderr), "\n")
+			if !strings.Contains(lines[0], " plan: inputs=1 ") || !strings.Contains(lines[len(lines)-1], " summary: addresses=1 probes=1 ") {
+				t.Fatalf("missing plan/summary: %s", stderr)
+			}
+			for _, want := range []string{"ports=\"[1] plus per-target ports\"", "concurrency=16", "timeout=1ms", "max_addresses=1048576", "output=\"stdout\""} {
+				if !strings.Contains(lines[0], want) {
+					t.Fatalf("missing %q in plan: %s", want, lines[0])
+				}
+			}
+			for _, line := range lines {
+				stamp, _, _ := strings.Cut(line, " ")
+				parsed, err := time.Parse(time.RFC3339, stamp)
+				if err != nil {
+					t.Fatalf("invalid log timestamp %q: %v", stamp, err)
+				}
+				_, got := parsed.Zone()
+				if _, want := parsed.In(location).Zone(); got != want {
+					t.Fatalf("timestamp %q has offset %d, want %d", stamp, got, want)
+				}
+			}
+			var r result
+			if err := json.Unmarshal([]byte(stdout), &r); err != nil {
+				t.Fatalf("invalid JSONL result: %v: %s", err, stdout)
+			}
+			if !strings.HasSuffix(r.Timestamp, "Z") {
+				t.Fatalf("JSON timestamp should remain UTC: %q", r.Timestamp)
+			}
+			if strings.Contains(stderr, " progress:") {
+				t.Fatalf("unexpected progress for small scan: %s", stderr)
+			}
+		})
+	}
+}
+
+func TestCLIProgressAndQuiet(t *testing.T) {
+	input := "127.0.0.0/23\n127.0.0.1:3\n127.0.0.1:3\n"
+	for _, quiet := range []bool{false, true} {
+		t.Run(fmt.Sprintf("quiet=%v", quiet), func(t *testing.T) {
+			args := []string{"-i", "-", "-p", "1,2", "-t", "1ms"}
+			if quiet {
+				args = append(args, "-q")
+			}
+			stdout, stderr, err := runCLI(t, "UTC", input, args...)
+			if err != nil {
+				t.Fatalf("CLI failed: %v: %s", err, stderr)
+			}
+			if got := len(strings.Split(strings.TrimSpace(stdout), "\n")); got != 1025 {
+				t.Fatalf("got %d results, want 1025", got)
+			}
+			if quiet {
+				if stderr != "" {
+					t.Fatalf("quiet scan logged: %s", stderr)
+				}
+				return
+			}
+			if strings.Count(stderr, " progress:") != 2 {
+				t.Fatalf("expected two progress messages: %s", stderr)
+			}
+			for _, want := range []string{"progress: addresses=256 ", "progress: addresses=512 ", "summary: addresses=512 probes=1025 "} {
+				if !strings.Contains(stderr, want) {
+					t.Fatalf("missing %q in logs: %s", want, stderr)
+				}
+			}
+		})
+	}
+}
+
+func TestCLIQuietRuntimeError(t *testing.T) {
+	stdout, stderr, err := runCLI(t, "UTC", "", "-q", "-c", "0", "127.0.0.1")
+	if err == nil || stdout != "" || stderr != "" {
+		t.Fatalf("expected silent failure, got stdout=%q stderr=%q error=%v", stdout, stderr, err)
+	}
+}
+
+func TestCLIExpansionErrorStillSummarizes(t *testing.T) {
+	stdout, stderr, err := runCLI(t, "UTC", "", "-max-targets", "1", "-p", "1", "-t", "1ms", "127.0.0.1", "127.0.0.2")
+	if err == nil {
+		t.Fatal("expected target limit failure")
+	}
+	if got := strings.Count(stdout, "\n"); got != 1 {
+		t.Fatalf("expected one result, got %d: %s", got, stdout)
+	}
+	lines := strings.Split(strings.TrimSpace(stderr), "\n")
+	if !strings.Contains(stderr, "error: mptcprobe: target limit") || !strings.Contains(lines[len(lines)-1], "summary: addresses=1 probes=1 ") {
+		t.Fatalf("expected error followed by a final partial summary: %s", stderr)
 	}
 }
