@@ -62,6 +62,16 @@ ports 8080 and 9090 for `144.202.29.87:8080`, and port 9090 for `example.com`.
 Without `-p`, entries with a port use only that port, while entries without a
 port use the default ports 80 and 443. `-i -` reads the list from stdin.
 
+Pipe open ports discovered by [Naabu](https://github.com/projectdiscovery/naabu)
+into the scanner to check them for MPTCP support:
+
+```sh
+naabu -host 192.0.2.0/24 -p 80,443 -silent |
+  ./mptcp-scanner -i -
+```
+
+`192.0.2.0/24` is reserved for documentation; replace it with your target network.
+
 Each resolved IP/port pair is probed only once per run, including across file
 entries, command-line targets, hostnames, and overlapping CIDRs. Additional
 ports for an already seen IP are still checked. IPv4 and IPv4-mapped IPv6
