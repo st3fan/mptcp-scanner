@@ -12,6 +12,17 @@ Repository: [st3fan/mptcprobe](https://github.com/st3fan/mptcprobe).
 TCP and every target is reported as `tcp`. The scanner prints a warning on
 stderr when it detects this, or when `net.mptcp.enabled=0`.
 
+Install it into `$GOBIN` (or `$GOPATH/bin`) with Go:
+
+```sh
+go install github.com/st3fan/mptcprobe@latest
+```
+
+This requires Go 1.27.1 or newer. The installed binary is named `mptcprobe`;
+make sure `$GOBIN` (or `$GOPATH/bin`) is on your `PATH`.
+
+To build from a local checkout instead:
+
 ```sh
 go build -o mptcprobe .                                 # local
 GOOS=linux GOARCH=amd64 go build -o mptcprobe-linux-amd64 . # for a Linux host
