@@ -1,8 +1,9 @@
 // mptcp-scanner connects to TCP endpoints with MPTCP (IPPROTO_MPTCP) enabled
 // and reports, as JSONL, whether the remote side actually spoke Multipath TCP.
 //
-// Targets may be IP addresses, CIDR blocks or hostnames. Each target is probed
-// on every requested port (default 80 and 443).
+// Targets may be IP addresses, CIDR blocks, hostnames or host:port endpoints.
+// Explicit endpoint ports are probed in addition to any requested ports;
+// targets without a port default to 80 and 443 when no ports are requested.
 package main
 
 import (
@@ -111,21 +112,19 @@ func main() {
 	timeout := flag.Duration("t", 2500*time.Millisecond, "per-connection timeout")
 	flag.DurationVar(timeout, "timeout", 2500*time.Millisecond, "alias for -t")
 	outPath := flag.String("o", "", "write JSONL here instead of stdout")
-	targetsFile := flag.String("f", "", "read targets from this file, one per line (\"-\" for stdin)")
+	targetsFile := flag.String("i", "", "read targets (host or host:port), one per line (\"-\" for stdin)")
+	flag.StringVar(targetsFile, "f", "", "alias for -i")
 	maxTargets := flag.Int("max-targets", 1<<20, "refuse to expand more than this many addresses (0 = no limit)")
 	quiet := flag.Bool("q", false, "suppress warnings and the summary on stderr")
 
 	flag.Usage = func() {
-		fmt.Fprintf(os.Stderr, "usage: %s [options] <ip|cidr|host> ...\n\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "usage: %s [options] [<ip|cidr|host|host:port> ...]\n\n", os.Args[0])
 		flag.PrintDefaults()
 		fmt.Fprintf(os.Stderr, "\nOutput is one JSON object per line:\n")
 		fmt.Fprintf(os.Stderr, "  status is one of mptcp, tcp, refused, timeout, unreachable, error\n")
 	}
 	flag.Parse()
 
-	if len(ports) == 0 {
-		ports = portList{80, 443}
-	}
 	ports = dedupePorts(ports)
 
 	specs := flag.Args()
@@ -272,11 +271,37 @@ func classify(err error) string {
 	return "error"
 }
 
+// parseTarget combines an endpoint's port with explicitly requested ports.
+// Only targets without either kind of port use the default ports.
+func parseTarget(spec string, ports []int) (string, []int, error) {
+	host := spec
+	if _, err := netip.ParseAddr(spec); err != nil && strings.ContainsAny(spec, ":[]") && !strings.Contains(spec, "/") {
+		var portText string
+		host, portText, err = net.SplitHostPort(spec)
+		if err != nil {
+			return "", nil, fmt.Errorf("invalid endpoint %q: %v", spec, err)
+		}
+		if host == "" {
+			return "", nil, fmt.Errorf("invalid endpoint %q: host is required", spec)
+		}
+		port, err := strconv.Atoi(portText)
+		if err != nil || port < 1 || port > 65535 {
+			return "", nil, fmt.Errorf("invalid endpoint %q: port must be a number between 1 and 65535", spec)
+		}
+		// Copy before appending so one endpoint's port cannot affect another.
+		ports = dedupePorts(append(append([]int(nil), ports...), port))
+	}
+	if len(ports) == 0 {
+		ports = []int{80, 443}
+	}
+	return host, ports, nil
+}
+
 // expand turns the target specs into jobs, streaming them so that large CIDRs
 // do not have to be held in memory.
 func expand(specs []string, ports []int, maxTargets int, quiet bool, jobs chan<- job) error {
 	emitted := 0
-	emit := func(spec string, ip netip.Addr) error {
+	emit := func(spec string, ip netip.Addr, ports []int) error {
 		if maxTargets > 0 && emitted >= maxTargets {
 			return fmt.Errorf("target limit of %d addresses reached (raise -max-targets)", maxTargets)
 		}
@@ -288,11 +313,16 @@ func expand(specs []string, ports []int, maxTargets int, quiet bool, jobs chan<-
 	}
 
 	for _, spec := range specs {
-		switch {
-		case strings.HasPrefix(spec, "-") && spec != "-":
+		if strings.HasPrefix(spec, "-") && spec != "-" {
 			return fmt.Errorf("%q looks like a flag: options must come before the targets", spec)
-		case strings.Contains(spec, "/"):
-			prefix, err := netip.ParsePrefix(spec)
+		}
+		host, targetPorts, err := parseTarget(spec, ports)
+		if err != nil {
+			return err
+		}
+		switch {
+		case strings.Contains(host, "/"):
+			prefix, err := netip.ParsePrefix(host)
 			if err != nil {
 				return fmt.Errorf("invalid CIDR %q: %v", spec, err)
 			}
@@ -302,18 +332,18 @@ func expand(specs []string, ports []int, maxTargets int, quiet bool, jobs chan<-
 				return fmt.Errorf("%s covers 2^%d addresses, refusing to scan it", spec, hostBits)
 			}
 			for ip := prefix.Addr(); prefix.Contains(ip); ip = ip.Next() {
-				if err := emit(spec, ip); err != nil {
+				if err := emit(spec, ip, targetPorts); err != nil {
 					return err
 				}
 			}
 		default:
-			if ip, err := netip.ParseAddr(spec); err == nil {
-				if err := emit(spec, ip.Unmap()); err != nil {
+			if ip, err := netip.ParseAddr(host); err == nil {
+				if err := emit(spec, ip.Unmap(), targetPorts); err != nil {
 					return err
 				}
 				continue
 			}
-			ips, err := net.LookupIP(spec)
+			ips, err := net.LookupIP(host)
 			if err != nil {
 				if !quiet {
 					fmt.Fprintf(os.Stderr, "warning: cannot resolve %q: %v\n", spec, err)
@@ -325,7 +355,7 @@ func expand(specs []string, ports []int, maxTargets int, quiet bool, jobs chan<-
 				if !ok {
 					continue
 				}
-				if err := emit(spec, ip.Unmap()); err != nil {
+				if err := emit(spec, ip.Unmap(), targetPorts); err != nil {
 					return err
 				}
 			}
