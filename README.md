@@ -38,6 +38,7 @@ mptcprobe [options] [<ip|cidr|host|host:port> ...]
 
   -p value          port to probe; repeatable, accepts lists and ranges (default 80,443)
   -c int            number of concurrent probes (default 16)
+  -r int            number of retries after a timeout (default 3; 0 = no retries)
   -t duration       per-connection timeout (default 2.5s)
   -timeout duration alias for -t (default 2.5s)
   -i string         read targets (host or host:port), one per line ("-" for stdin)
@@ -52,6 +53,14 @@ Options must come before the targets. Targets may be IPs, CIDR blocks,
 hostnames (all resolved addresses are probed), or `host:port` endpoints. Use
 `[IPv6]:port` for IPv6 endpoints; bare IPv6 addresses are also accepted. A CIDR
 wider than 2^20 addresses is rejected.
+
+Each endpoint gets one initial connection attempt and up to `-r` retries, only
+after a timeout. The default is 3 retries (up to 4 attempts); `-r 0` disables
+retries, and negative values are rejected. Each attempt has its own `-t`
+timeout. A success or any other error stops retries immediately. Only the final
+attempt produces a JSONL result and contributes to the scan statistics;
+`timestamp` and `rtt_ms` describe that final attempt. Retries use the same worker,
+so `-c` still limits concurrent connection attempts.
 
 ```sh
 mptcprobe -p 8080 144.202.29.87
@@ -86,7 +95,7 @@ naabu -host 192.0.2.0/24 -p 80,443 -silent |
 
 `192.0.2.0/24` is reserved for documentation; replace it with your target network.
 
-Each resolved IP/port pair is probed only once per run, including across file
+Each resolved IP/port pair is scheduled only once per run, including across file
 entries, command-line targets, hostnames, and overlapping CIDRs. Additional
 ports for an already seen IP are still checked. IPv4 and IPv4-mapped IPv6
 addresses are treated as the same IP. `-max-targets` counts unique IP addresses;
@@ -95,7 +104,7 @@ the scanner keeps a record of scheduled IPs and ports in memory.
 Logs go to stderr through Go's `log` package. Every log line starts with an
 ISO 8601 timestamp with a timezone offset, using the local timezone selected
 by `TZ` (for example, `TZ=America/Toronto`). JSONL result timestamps remain UTC.
-At startup, a plan reports the input count, ports, concurrency, timeout,
+At startup, a plan reports the input count, ports, concurrency, timeout, retries,
 address limit, and output destination. Input counts are target specifications,
 before DNS resolution, CIDR expansion, and deduplication.
 
@@ -124,7 +133,7 @@ One JSON object per line:
 | `mptcp`       | connected and the connection is using MPTCP                   |
 | `tcp`         | connected, but fell back to plain TCP (no server support)     |
 | `refused`     | connection refused or reset                                   |
-| `timeout`     | no answer within `-t`                                         |
+| `timeout`     | all connection attempts timed out within their `-t` limits     |
 | `unreachable` | host or network unreachable                                   |
 | `error`       | anything else; see the `error` field                          |
 

@@ -17,6 +17,86 @@ import (
 	"time"
 )
 
+func TestProbeWithRetries(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		retries  int
+		statuses []string
+	}{
+		{"disabled", 0, []string{"timeout"}},
+		{"exhausted", 3, []string{"timeout", "timeout", "timeout", "timeout"}},
+		{"one retry", 1, []string{"timeout", "timeout"}},
+		{"success after timeout", 3, []string{"timeout", "mptcp"}},
+		{"success on last retry", 3, []string{"timeout", "timeout", "timeout", "tcp"}},
+		{"immediate success", 3, []string{"tcp"}},
+		{"refused", 3, []string{"refused"}},
+		{"unreachable", 3, []string{"unreachable"}},
+		{"error", 3, []string{"error"}},
+		{"refused after timeout", 3, []string{"timeout", "refused"}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			j := job{"example.com:443", netip.MustParseAddr("192.0.2.1"), 443}
+			calls := 0
+			var last result
+			got := probeWithRetries(j, time.Second, tt.retries, func(gotJob job, timeout time.Duration) result {
+				if gotJob != j || timeout != time.Second {
+					t.Fatalf("attempt got job=%v timeout=%v", gotJob, timeout)
+				}
+				if calls >= len(tt.statuses) {
+					t.Fatal("unexpected extra attempt")
+				}
+				status := tt.statuses[calls]
+				calls++
+				last = result{
+					Timestamp: fmt.Sprint(calls), Target: j.spec, IP: j.ip.String(), Port: j.port,
+					Status: status, MPTCP: status == "mptcp", Connected: status == "mptcp" || status == "tcp",
+					RTTms: float64(calls),
+				}
+				if !last.Connected {
+					last.Error = status
+				}
+				return last
+			})
+			if calls != len(tt.statuses) || got != last {
+				t.Fatalf("got %d attempts and %+v, want %d attempts and %+v", calls, got, len(tt.statuses), last)
+			}
+		})
+	}
+}
+
+func TestCLIRetries(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"default", nil, "retries=3"},
+		{"disabled", []string{"-r", "0"}, "retries=0"},
+		{"custom", []string{"-r", "5"}, "retries=5"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			args := append(tt.args, "-p", "1", "-t", "1ms", "127.0.0.1")
+			stdout, stderr, err := runCLI(t, "UTC", "", args...)
+			if err != nil || !strings.Contains(stderr, tt.want) || strings.Count(stdout, "\n") != 1 {
+				t.Fatalf("unexpected CLI result: stdout=%q stderr=%q error=%v", stdout, stderr, err)
+			}
+		})
+	}
+	for _, quiet := range []bool{false, true} {
+		args := []string{"-r", "-1", "127.0.0.1"}
+		if quiet {
+			args = append([]string{"-q"}, args...)
+		}
+		stdout, stderr, err := runCLI(t, "UTC", "", args...)
+		if err == nil || stdout != "" {
+			t.Fatalf("expected negative retry count to fail: stdout=%q error=%v", stdout, err)
+		}
+		if quiet && stderr != "" || !quiet && !strings.Contains(stderr, "-r must be at least 0") {
+			t.Fatalf("unexpected validation log (quiet=%v): %q", quiet, stderr)
+		}
+	}
+}
+
 func TestParseTarget(t *testing.T) {
 	for _, tt := range []struct {
 		name  string

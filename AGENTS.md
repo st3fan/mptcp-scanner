@@ -86,4 +86,4 @@ Quick local smoke test (expect all `tcp`/`refused`/`timeout` on macOS):
   but only on Linux — it would need a build tag and CI that runs there.
 - Reporting MPTCP version or subflow details from `MPTCP_INFO` (Go does not
   expose it; would need a raw `getsockopt`).
-- Retries; rate limiting.
+- Rate limiting.
