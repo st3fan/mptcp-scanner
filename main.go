@@ -174,6 +174,7 @@ func main() {
 	var ports portList
 	flag.Var(&ports, "p", "port to probe; repeatable, accepts lists and ranges (default 80,443)")
 	concurrency := flag.Int("c", 16, "number of concurrent probes")
+	retries := flag.Int("r", 3, "number of retries after a timeout (0 = no retries)")
 	timeout := flag.Duration("t", 2500*time.Millisecond, "per-connection timeout")
 	flag.DurationVar(timeout, "timeout", 2500*time.Millisecond, "alias for -t")
 	outPath := flag.String("o", "", "write JSONL here instead of stdout")
@@ -211,6 +212,9 @@ func main() {
 	if *concurrency < 1 {
 		fatal("-c must be at least 1")
 	}
+	if *retries < 0 {
+		fatal("-r must be at least 0")
+	}
 
 	out := io.Writer(os.Stdout)
 	if *outPath != "" {
@@ -238,8 +242,8 @@ func main() {
 		outputPlan = *outPath
 	}
 	stats := newScanStats()
-	log.Printf("plan: inputs=%d ports=%q concurrency=%d timeout=%s max_addresses=%s output=%q",
-		len(specs), portPlan, *concurrency, *timeout, limitPlan, outputPlan)
+	log.Printf("plan: inputs=%d ports=%q concurrency=%d timeout=%s retries=%d max_addresses=%s output=%q",
+		len(specs), portPlan, *concurrency, *timeout, *retries, limitPlan, outputPlan)
 	if warning := localMPTCPWarning(); warning != "" {
 		log.Printf("warning: %s", warning)
 	}
@@ -253,7 +257,7 @@ func main() {
 		go func() {
 			defer wg.Done()
 			for j := range jobs {
-				results <- probe(j, *timeout)
+				results <- probeWithRetries(j, *timeout, *retries, probe)
 			}
 		}()
 	}
@@ -295,7 +299,19 @@ func main() {
 	}
 }
 
-// probe dials one endpoint with MPTCP requested and reports what came back.
+// probeWithRetries keeps each endpoint in its worker until it finishes or
+// exhausts its timeout retries. Only the final attempt is emitted and counted.
+func probeWithRetries(j job, timeout time.Duration, retries int, attempt func(job, time.Duration) result) result {
+	for {
+		r := attempt(j, timeout)
+		if r.Status != "timeout" || retries <= 0 {
+			return r
+		}
+		retries--
+	}
+}
+
+// probe dials one endpoint once with MPTCP requested and reports what came back.
 func probe(j job, timeout time.Duration) result {
 	r := result{
 		Timestamp: time.Now().UTC().Format(time.RFC3339Nano),
